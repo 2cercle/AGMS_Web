@@ -25,7 +25,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# 한글 폰트 설정
+# 한글 폰트 설정 (OS별 자동 대응)
 system_name = platform.system()
 if system_name == 'Windows':
     plt.rcParams['font.family'] = 'Malgun Gothic'
@@ -54,12 +54,12 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
             # (만약 헤더가 첫 줄이라면 skiprows=0으로 수정 필요)
             libre_df = pd.read_csv(libre_file, skiprows=1) 
             
-        # 컬럼 매핑 (이름이 조금 달라도 처리되도록)
+        # 컬럼 매핑 (이름이 조금 달라도 처리되도록 유연성 확보)
         col_map = {
             'Device Timestamp': 'ts', 
             'Historic Glucose mg/dL': 'gl', 
             'Scan Glucose mg/dL': 'gl_scan',
-            'Timestamp': 'ts', # 혹시 모를 다른 이름 대비
+            'Timestamp': 'ts', 
             'Glucose': 'gl'
         }
         libre_df = libre_df.rename(columns=lambda x: col_map.get(x, x))
@@ -68,7 +68,7 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
         libre_df['ts'] = pd.to_datetime(libre_df['ts'], errors='coerce')
         libre_df = libre_df.dropna(subset=['ts'])
         
-        # 스캔 혈당 병합
+        # 스캔 혈당 병합 (Historic이 없으면 Scan 사용)
         if 'gl' not in libre_df.columns and 'gl_scan' in libre_df.columns:
             libre_df['gl'] = libre_df['gl_scan']
         
@@ -77,6 +77,7 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
         libre_df = libre_df.sort_values('ts')
         
         # ★ 시간 지연(Lag) 즉시 적용 (Manual)
+        # 리브레 시간에서 지연 시간을 뺌으로써, 센서 데이터와 매칭 시점 조절
         libre_df['ts_merge'] = libre_df['ts'] - pd.Timedelta(minutes=lag_minutes)
         libre_df = libre_df.sort_values('ts_merge')
         
@@ -85,12 +86,12 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
 
     # --- 2. 센서(Raw) 데이터 로드 ---
     sensor_list = []
-    # 센서 데이터에서 꼭 필요한 컬럼명 (파일명 상관없이 이 컬럼만 있으면 됨)
+    # 센서 데이터에서 꼭 필요한 컬럼명
     use_cols = ['experiment_date', 'value_current', 'value_ae', 'value_temperature']
     
     for sf in sensor_files:
         try:
-            # 필요한 컬럼만 쏙 뽑아서 읽기
+            # 필요한 컬럼만 쏙 뽑아서 읽기 (속도 최적화)
             temp = pd.read_csv(sf, usecols=lambda c: c in use_cols)
             sensor_list.append(temp)
         except:
@@ -98,7 +99,7 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
             pass
 
     if not sensor_list:
-        return None, None, "유효한 센서 데이터가 없습니다. (CSV 내 컬럼명을 확인하세요: experiment_date, value_current 등)"
+        return None, None, "유효한 센서 데이터가 없습니다. (CSV 내 컬럼명 확인: experiment_date, value_current 등)"
 
     sensor_df = pd.concat(sensor_list, ignore_index=True)
     sensor_df['timestamp'] = pd.to_datetime(sensor_df['experiment_date'], errors='coerce')
@@ -136,9 +137,8 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
 # -----------------------------------------------------------------------------
 with st.sidebar:
     st.header("📂 1. 데이터 입력")
-    st.info("※ 파일명은 상관없습니다. 위치에 맞게 올려주세요.")
     
-    uploaded_libre = st.file_uploader("1) 리브레 정답지 (엑셀/CSV)", type=['csv', 'xlsx'])
+    uploaded_libre = st.file_uploader("1) 리브레 데이터 (엑셀/CSV)", type=['csv', 'xlsx'])
     uploaded_sensors = st.file_uploader("2) 센서 데이터 (CSV, 다중 선택)", type=['csv'], accept_multiple_files=True)
     
     st.header("⚙️ 2. 분석 설정")
@@ -146,7 +146,7 @@ with st.sidebar:
     warmup_hr = st.number_input("초기 제거 (시간)", value=24, step=1, help="부착 초기 불안정 구간 제외")
     
     st.header("📝 3. 리포트 정보")
-    memo = st.text_input("실험 메모", placeholder="예: 24382 이동근, 카본 공정 A")
+    memo = st.text_input("실험 메모", placeholder="실험 내용 입력")
     
     st.divider()
     run_btn = st.button("분석 실행 🚀", type="primary", use_container_width=True)
@@ -156,7 +156,9 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 if run_btn:
     if uploaded_libre and uploaded_sensors:
-        st.title(f"📊 AGMS 분석 결과: {memo}" if memo else "📊 AGMS 분석 결과")
+        # 타이틀 설정
+        report_title = f"📊 AGMS 분석 결과: {memo}" if memo else "📊 AGMS 분석 결과"
+        st.title(report_title)
         
         with st.spinner('데이터 병합 및 AI 분석 중...'):
             df, _, err = process_data(uploaded_libre, uploaded_sensors, lag_min, warmup_hr)
@@ -164,7 +166,7 @@ if run_btn:
             if err:
                 st.error(err)
             else:
-                # --- 머신러닝 모델링 ---
+                # --- 머신러닝 모델링 (Random Forest) ---
                 features = ['value_current_kf', 'value_ae_kf', 'value_temperature_kf', 'hours_since_start']
                 X = df[features]
                 y = df['gl']
@@ -197,7 +199,7 @@ if run_btn:
                 
                 st.divider()
 
-                # 2. 인터랙티브 시계열 그래프
+                # 2. 인터랙티브 시계열 그래프 (Plotly)
                 st.subheader("📈 실시간 혈당 추적")
                 fig = go.Figure()
                 # 실제 혈당
@@ -222,7 +224,7 @@ if run_btn:
                 c1, c2 = st.columns(2)
                 
                 with c1:
-                    st.markdown("##### 🎯 정확도 분석 (Clarke Grid Style)")
+                    st.markdown("##### 🎯 정확도 분석 (Zone A)")
                     fig_acc, ax = plt.subplots(figsize=(6, 5))
                     ax.scatter(y_test, y_pred, alpha=0.4, color='blue', s=30)
                     
