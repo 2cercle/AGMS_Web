@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-AGMS Sensor Analysis Dashboard (Manual Mode)
+AGMS Sensor Analysis Dashboard (Manual Mode) - Modified
 Powered by Streamlit
 """
 import streamlit as st
@@ -50,11 +50,9 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
         if libre_file.name.endswith('.xlsx'):
             libre_df = pd.read_excel(libre_file)
         else:
-            # 보통 기기 데이터는 헤더가 2번째 줄에 있으므로 skiprows=1 유지
-            # (만약 헤더가 첫 줄이라면 skiprows=0으로 수정 필요)
             libre_df = pd.read_csv(libre_file, skiprows=1) 
             
-        # 컬럼 매핑 (이름이 조금 달라도 처리되도록 유연성 확보)
+        # 컬럼 매핑
         col_map = {
             'Device Timestamp': 'ts', 
             'Historic Glucose mg/dL': 'gl', 
@@ -77,7 +75,6 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
         libre_df = libre_df.sort_values('ts')
         
         # ★ 시간 지연(Lag) 즉시 적용 (Manual)
-        # 리브레 시간에서 지연 시간을 뺌으로써, 센서 데이터와 매칭 시점 조절
         libre_df['ts_merge'] = libre_df['ts'] - pd.Timedelta(minutes=lag_minutes)
         libre_df = libre_df.sort_values('ts_merge')
         
@@ -86,16 +83,13 @@ def process_data(libre_file, sensor_files, lag_minutes, warmup_hours):
 
     # --- 2. 센서(Raw) 데이터 로드 ---
     sensor_list = []
-    # 센서 데이터에서 꼭 필요한 컬럼명
     use_cols = ['experiment_date', 'value_current', 'value_ae', 'value_temperature']
     
     for sf in sensor_files:
         try:
-            # 필요한 컬럼만 쏙 뽑아서 읽기 (속도 최적화)
             temp = pd.read_csv(sf, usecols=lambda c: c in use_cols)
             sensor_list.append(temp)
         except:
-            # 컬럼이 없는 엉뚱한 파일은 무시
             pass
 
     if not sensor_list:
@@ -156,7 +150,6 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 if run_btn:
     if uploaded_libre and uploaded_sensors:
-        # 타이틀 설정
         report_title = f"📊 AGMS 분석 결과: {memo}" if memo else "📊 AGMS 분석 결과"
         st.title(report_title)
         
@@ -171,7 +164,7 @@ if run_btn:
                 X = df[features]
                 y = df['gl']
                 
-                # 시계열 순서 유지 분할 (Shuffle=False) -> 과적합 방지
+                # 시계열 순서 유지 분할 (Shuffle=False)
                 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
                 
                 model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
@@ -182,10 +175,11 @@ if run_btn:
                 r2 = r2_score(y_test, y_pred)
                 mard = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
                 
-                # 15/15% 정확도
+                # 15/15% 정확도 판별 함수
                 def check_15_15(yt, yp):
                     if yt < 100: return abs(yt - yp) <= 15
                     else: return abs(yt - yp) / yt <= 0.15
+                
                 acc_15 = (sum([check_15_15(yt, yp) for yt, yp in zip(y_test, y_pred)]) / len(y_test)) * 100
                 
                 # --- 결과 표시 ---
@@ -195,28 +189,54 @@ if run_btn:
                 kpi1.metric("MARD (오차율)", f"{mard:.2f}%", delta_color="inverse")
                 kpi2.metric("15/15% 정확도", f"{acc_15:.2f}%")
                 kpi3.metric("R-Squared", f"{r2:.4f}")
-                kpi4.metric("샘플 수", f"{len(df)}개")
+                kpi4.metric("샘플 수 (Test)", f"{len(y_test)}개")
                 
                 st.divider()
 
-                # 2. 인터랙티브 시계열 그래프 (Plotly)
-                st.subheader("📈 실시간 혈당 추적")
+                # 2. 인터랙티브 시계열 그래프 (Plotly) - 수정됨
+                st.subheader("📈 혈당 그래프 (15/15% Zone 포함)")
+                
+                # 예측값 기준의 15/15% Boundary 계산 (Visualization용)
+                upper_bound = [p + 15 if p < 100 else p * 1.15 for p in y_pred]
+                lower_bound = [p - 15 if p < 100 else p * 0.85 for p in y_pred]
+                
                 fig = go.Figure()
-                # 실제 혈당
+
+                # (1) Lower Bound (투명선, fill을 위한 기준)
                 fig.add_trace(go.Scatter(
-                    y=y_test, mode='lines', name='실제 혈당 (Libre)',
-                    line=dict(color='black', width=2)
+                    x=y_test.index, y=lower_bound,
+                    mode='lines', line=dict(width=0),
+                    showlegend=False, hoverinfo='skip'
                 ))
-                # 예측 혈당
+
+                # (2) Upper Bound (채우기, AI 예측의 허용 범위)
                 fig.add_trace(go.Scatter(
-                    y=y_pred, mode='lines', name='AI 예측 (Predicted)',
-                    line=dict(color='red', width=2, dash='dot')
+                    x=y_test.index, y=upper_bound,
+                    mode='lines', line=dict(width=0),
+                    fill='tonexty', fillcolor='rgba(255, 0, 0, 0.15)', # 옅은 빨간색 채우기
+                    name='15/15% 허용범위',
+                    hoverinfo='skip'
                 ))
+
+                # (3) AI 예측 혈당
+                fig.add_trace(go.Scatter(
+                    x=y_test.index, y=y_pred,
+                    mode='lines', name='AI 예측 (Predicted)',
+                    line=dict(color='#d62728', width=2, dash='dot') # 빨간 점선
+                ))
+
+                # (4) 실제 혈당 (제일 위에 그리기)
+                fig.add_trace(go.Scatter(
+                    x=y_test.index, y=y_test,
+                    mode='lines', name='실제 혈당 (Libre)',
+                    line=dict(color='#1f77b4', width=2) # 파란 실선
+                ))
+
                 fig.update_layout(
-                    height=450,
+                    height=500,
                     margin=dict(l=20, r=20, t=30, b=20),
                     hovermode="x unified",
-                    legend=dict(orientation="h", y=1.05, x=1)
+                    legend=dict(orientation="h", y=1.05, x=0.5, xanchor='center')
                 )
                 st.plotly_chart(fig, use_container_width=True)
                 
@@ -224,13 +244,12 @@ if run_btn:
                 c1, c2 = st.columns(2)
                 
                 with c1:
-                    st.markdown("##### 🎯 정확도 분석 (Zone A)")
+                    st.markdown("##### 🎯 정확도 분석 (Clarke Error Grid 스타일)")
                     fig_acc, ax = plt.subplots(figsize=(6, 5))
-                    ax.scatter(y_test, y_pred, alpha=0.4, color='blue', s=30)
+                    ax.scatter(y_test, y_pred, alpha=0.5, color='#1f77b4', s=30, edgecolor='k', linewidth=0.5)
                     
-                    # 기준선 및 Zone
-                    min_v, max_v = min(y_test.min(), y_pred.min()), max(y_test.max(), y_pred.max())
-                    ax.plot([min_v, max_v], [min_v, max_v], 'k-', lw=1.5)
+                    min_v, max_v = min(y_test.min(), y_pred.min()) * 0.9, max(y_test.max(), y_pred.max()) * 1.1
+                    ax.plot([min_v, max_v], [min_v, max_v], 'k-', lw=1.5, label='Ideal')
                     
                     x_rng = np.linspace(min_v, max_v, 100)
                     u_b = [x+15 if x<100 else x*1.15 for x in x_rng]
@@ -238,7 +257,7 @@ if run_btn:
                     
                     ax.plot(x_rng, u_b, 'r--', lw=1)
                     ax.plot(x_rng, l_b, 'r--', lw=1)
-                    ax.fill_between(x_rng, l_b, u_b, color='green', alpha=0.1, label='Zone A')
+                    ax.fill_between(x_rng, l_b, u_b, color='green', alpha=0.1, label='Zone A (15/15%)')
                     
                     ax.set_xlabel('Reference (mg/dL)')
                     ax.set_ylabel('Predicted (mg/dL)')
@@ -247,13 +266,13 @@ if run_btn:
                     st.pyplot(fig_acc)
                     
                 with c2:
-                    st.markdown("##### 📊 오차 분포 (0에 가까울수록 좋음)")
+                    st.markdown("##### 📊 오차 분포 (Residuals)")
                     errors = y_pred - y_test
                     fig_hist, ax2 = plt.subplots(figsize=(6, 5))
                     sns.histplot(errors, kde=True, bins=25, color='orange', ax=ax2)
                     ax2.axvline(0, color='black', linestyle='--')
-                    ax2.set_xlabel('Error (mg/dL)')
-                    ax2.set_ylabel('Frequency')
+                    ax2.set_xlabel('Error (Predicted - Reference)')
+                    ax2.set_ylabel('Count')
                     ax2.grid(True, alpha=0.3)
                     st.pyplot(fig_hist)
                 
@@ -262,10 +281,23 @@ if run_btn:
                 
                 # 결과 데이터 정리
                 res_df = df.copy()
-                res_df['Predicted_Glucose'] = np.nan
-                res_df.loc[y_test.index, 'Predicted_Glucose'] = y_pred
-                res_df['Error'] = res_df['Predicted_Glucose'] - res_df['gl']
                 
+                # 예측값 컬럼 생성 및 채우기
+                res_df['Predicted_Glucose'] = np.nan # 초기화
+                
+                # y_test의 인덱스에 해당하는 위치에 예측값 삽입
+                # (주의: Train 데이터 구간은 빈칸으로 남습니다)
+                res_df.loc[y_test.index, 'Predicted_Glucose'] = y_pred
+                
+                # 오차 계산 (예측값이 있는 구간만 계산됨)
+                res_df['Error_Diff'] = res_df['Predicted_Glucose'] - res_df['gl']
+                res_df['Error_Pct'] = (res_df['Error_Diff'] / res_df['gl']) * 100
+                
+                # 엑셀 저장용 컬럼 순서 정리 (보기 좋게)
+                save_cols = ['ts', 'gl', 'Predicted_Glucose', 'Error_Diff', 'Error_Pct'] + \
+                            [c for c in res_df.columns if c not in ['ts', 'gl', 'Predicted_Glucose', 'Error_Diff', 'Error_Pct']]
+                res_df = res_df[save_cols]
+
                 buffer = io.BytesIO()
                 with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                     res_df.to_excel(writer, index=False, sheet_name='Raw_Data')
@@ -276,7 +308,7 @@ if run_btn:
                     summary.to_excel(writer, index=False, sheet_name='Summary')
                     
                 st.download_button(
-                    label="📊 엑셀 파일 받기 (.xlsx)",
+                    label="📊 결과 엑셀 다운로드 (예측값 포함)",
                     data=buffer.getvalue(),
                     file_name=f"AGMS_Result_{memo}.xlsx" if memo else "AGMS_Result.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
