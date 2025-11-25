@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-AGMS Sensor Analysis Dashboard (Auto Lag Optimization + Full Clarke Grid)
+AGMS Sensor Analysis Dashboard (Simple Excel Output Version)
 Powered by Streamlit
 """
 import streamlit as st
@@ -139,7 +139,7 @@ def load_and_clean_data(libre_file, sensor_files, warmup_hours):
     
     for sf in sensor_files:
         try:
-            sf.seek(0) # 파일 포인터 초기화 (중요)
+            sf.seek(0) # 파일 포인터 초기화
             temp = pd.read_csv(sf, usecols=lambda c: c in use_cols)
             sensor_list.append(temp)
         except: pass
@@ -172,7 +172,6 @@ def merge_with_lag(libre_df, sensor_df, lag_minutes):
     2단계: 특정 Lag를 적용하여 병합 (반복 호출용)
     """
     temp_libre = libre_df.copy()
-    # 리브레 시간을 뒤로 당김 = 센서가 리브레보다 늦게 반응함을 보정
     temp_libre['ts_merge'] = temp_libre['ts'] - pd.Timedelta(minutes=lag_minutes)
     temp_libre = temp_libre.sort_values('ts_merge')
     
@@ -183,7 +182,7 @@ def merge_with_lag(libre_df, sensor_df, lag_minutes):
 
 def train_and_evaluate(df):
     """
-    3단계: 모델 학습 및 정확도(15/15%) 반환
+    3단계: 모델 학습 및 정확도 반환
     """
     if df.empty or len(df) < 10: return 0, 0, None, None, None
 
@@ -193,7 +192,7 @@ def train_and_evaluate(df):
     
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
     
-    model = RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1) # 속도를 위해 estimators 조절
+    model = RandomForestRegressor(n_estimators=50, random_state=42, n_jobs=-1)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
     
@@ -215,7 +214,6 @@ with st.sidebar:
     
     st.header("⚙️ 2. 분석 설정")
     
-    # 최적화 옵션 추가
     use_auto_lag = st.checkbox("✅ 최적 시간 지연 자동 탐색", value=False, help="5~15분 범위에서 정확도가 가장 높은 시간을 자동으로 찾습니다.")
     
     if use_auto_lag:
@@ -259,14 +257,11 @@ if run_btn:
                 progress_text = "최적 시간 지연(Lag) 탐색 중... (5~15분)"
                 my_bar = st.progress(0, text=progress_text)
                 
-                # 탐색 범위: 5분 ~ 15분
                 search_range = range(5, 16)
                 total_steps = len(search_range)
                 
                 for i, temp_lag in enumerate(search_range):
-                    # Merge
                     temp_df = merge_with_lag(libre_df, sensor_df, temp_lag)
-                    # Train & Eval
                     acc, model, xt, yt, yp = train_and_evaluate(temp_df)
                     
                     if acc > best_acc:
@@ -292,7 +287,7 @@ if run_btn:
             if final_results and final_results[3] is not None:
                 acc_15, model, X_test, y_test, y_pred = final_results
                 
-                # R2, MARD 재계산 (최종 모델 기준)
+                # R2, MARD 재계산
                 r2 = r2_score(y_test, y_pred)
                 mard = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
                 
@@ -334,17 +329,27 @@ if run_btn:
                     ax2.set_xlabel('Error (Predicted - Reference)')
                     st.pyplot(fig_hist)
                 
-                # --- Excel Download ---
+                # --- Excel Download (간소화) ---
                 st.subheader("📥 리포트 다운로드")
                 res_df = final_df.copy()
+                
+                # 예측값 삽입
                 res_df['Predicted_Glucose'] = np.nan
                 res_df.loc[y_test.index, 'Predicted_Glucose'] = y_pred
-                res_df['Error_Diff'] = res_df['Predicted_Glucose'] - res_df['gl']
-                res_df['Error_Pct'] = (res_df['Error_Diff'] / res_df['gl']) * 100
-                zones = [get_clarke_zone(r, p) if pd.notnull(p) else np.nan for r, p in zip(res_df['gl'], res_df['Predicted_Glucose'])]
-                res_df['Clarke_Zone'] = zones
                 
-                save_cols = ['ts', 'gl', 'Predicted_Glucose', 'Clarke_Zone', 'Error_Diff', 'Error_Pct'] + [c for c in res_df.columns if c not in ['ts', 'gl', 'Predicted_Glucose', 'Clarke_Zone', 'Error_Diff', 'Error_Pct']]
+                # [수정] 15/15% 정확도 판별 컬럼 생성
+                def is_accurate(row):
+                    yt = row['gl']
+                    yp = row['Predicted_Glucose']
+                    if pd.isna(yt) or pd.isna(yp): return np.nan
+                    
+                    if yt < 100: return abs(yt - yp) <= 15
+                    else: return abs(yt - yp) / yt <= 0.15
+
+                res_df['Is_Accurate_15_15'] = res_df.apply(is_accurate, axis=1)
+                
+                # 요청하신 컬럼만 선택 (ts, gl, Predicted, 판별결과)
+                save_cols = ['ts', 'gl', 'Predicted_Glucose', 'Is_Accurate_15_15']
                 res_df = res_df[save_cols]
 
                 buffer = io.BytesIO()
@@ -356,7 +361,13 @@ if run_btn:
                     })
                     summary.to_excel(writer, index=False, sheet_name='Summary')
                     
-                st.download_button(label="📊 결과 엑셀 다운로드", data=buffer.getvalue(), file_name=f"AGMS_Result_{memo}.xlsx" if memo else "AGMS_Result.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                st.download_button(
+                    label="📊 결과 엑셀 다운로드 (간소화 버전)", 
+                    data=buffer.getvalue(), 
+                    file_name=f"AGMS_Result_{memo}.xlsx" if memo else "AGMS_Result.xlsx", 
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+                    use_container_width=True
+                )
             else:
                 st.error("분석할 데이터가 충분하지 않습니다.")
     else:
